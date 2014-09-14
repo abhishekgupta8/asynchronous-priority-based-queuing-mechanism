@@ -1,1 +1,147 @@
-123
+INTRODUCTION
+
+This assignment is about asynchronous and concurrent processing of the producer consumer problem. It involves efficient kernel
+locking and callbacks. This assignment has been prepared as a system call in the form of a loadable unloadable module. The 
+system call mainly deals with performing expensive file operations in parallel and returning the results to the user in an
+asynchronous manner.
+
+The file system operations (read/write) are performed in the kernel to eliminate expensive user/kernel data copies and context 
+switches. Since some operations can take really long to finish, the system call is designed in such a way that the user program
+can exit while concurrent operations were being performed in the kernel. In this scenario, the user has the option to submit
+more jobs to the system call while other operations are underway. The system call keeps adding the newly submitted jobs in its
+queue to perform when the existing jobs have finished execution.
+FEATURES 
+This assignment supports the following operations for the user to perform on the given input files:
+1)	Calculate checksum of the file using
+a)	CRC32 or,
+b)	MD5
+2)	Perform Encryption / Decryption using the following algorithms
+a)	AES
+b)	Blowfish
+The user has the option of assigning the jobs a priority, if needed. If no priority is given then every job is assumed to be 
+of equal priority.
+The checksums are saved in the current working directory as <filename>.cs for CRC32 and <filename>.md5 for MD5.
+The encryption files can be saved in such a way that it replaces the original file with the encrypted file or unlinks the 
+original file and creates a new encrypted file with the name <filename>.en. For decryption the user can replace the encrypted
+file with the decrypted file (i.e. the decrypted file will have the same name as the encrypted file and the original encrypted 
+file will be removed) or create the decrypted file with the original name <filename> (i.e. name of the file before encryption) 
+and removing the <filename>.en file.
+
+
+
+USAGE
+The user is required to insert the sys_xjob.ko module to start with by executing the command
+insmod sys_xjob.ko
+Next, the xhw3 program takes input from the user from the command prompt. It performs exhaustive validations check regarding the syntax of the input arguments and returns an error to the user if the arguments specified by not in a proper format. The required format of the inputs to the xhw3 program is as follows:
+./xhw3 [operation] [flags] infile1 infile2 [key]
+Where operations can be:
+•	-E: Encrypt the files.
+•	-D: Decrypt the files.
+•	-s: Perform checksums. (default operation if not specified by user)
+•	-r: Remove a particular job from the queue by job id.
+•	-A: Remove all the jobs from the queue.
+•	-p: Print all jobs in the queue.
+•	-O: For overwriting the existing file in case of encryption/decryption. 
+•	-R: For renaming the existing file in case of encryption/decryption. (default operation if not specified by user)
+•	-c: To make the user program wait for callback.
+Flags can be:
+•	-e: For giving a priority to input files
+o	1. High Priority
+o	2. Medium Priority
+o	3. Low Priority
+If the same priority is assigned to two concurrently executing jobs, then the one that was submitted earlier gets executed 
+first in FCFS order.
+•	-a: For selecting the type of algorithm to be used for encryption/decryption or checksum. Permitted values are 1 and 2 for 
+checksum and 1, and 2 for encryption/decryption.
+o	1: CRC32 (default algorithm if not specified by user)
+o	2: MD5
+o	1: AES (default algorithm if not specified by user)
+o	2: Blowfish
+Also, user can specify a key for encryption/decryption which is the last argument. The user has to specify the same key while
+decrypting which he has entered while encrypting else the file will be corrupted. If the key is not specified, default value
+taken is 00000.
+
+EXAMPLES:
+1)	./xhw3 -E –e 1 –a 1 infile1 key_1
+This command will encrypt infile1 with key_1 using AES as encryption algorithm and assign the priority of this job to High. 
+2)	./xhw3 –s –a 1 infile1
+This command will compute checksum of infile1 using CRC32 as algorithm.
+3)	./xhw3 –p
+This command will print all the jobs in the queue.
+4)	./xhw3 –r 1 4 5
+This command will remove jobs with job id 1, 4 and 5 from the queue.
+5)	./xhw3 –A
+This command will remove all the jobs from the queue.
+6)	./xhw3 -EO infile1
+This command will overwrite infile1 with the encrypted file.
+Note: Please pass full path from root with all the file names
+DESIGN
+This assignment is composed of a system call sys_xjob and a user program xhw3. The user has the option to specify the job 
+type and the input files from xhw3. These are submitted to the system call for processing. The system call notifies the user, 
+if it is still running which is achieved by enabling callback while submitting the job. For each task that it has completed, 
+it writes the results to a file in the current working directory according to the operation (checksum, encryption/decryption). 
+Also, a log file is populated with the name .prod_cons.log in the current working directory which logs the status of all the 
+jobs.
+Figure shows the basic flow of execution.
+ 
+A)	Inserting the module and initializing queues
+Once the user has inserted the module two shared queues get initialized. These are the main queue and the wait queue. 
+These queues are of length 5 each. Initially the main queue and wait queue are empty. They are protected by the locking
+mechanism described later in this document. Two consumer kthreads are also initialized which sleep on the condition that the
+main queue has jobs to process.
+
+B)	Passing arguments from the user program xhw3 to the system call sys_xjob
+Once the user has submitted the correct arguments to the xhw3 program, they are sent to the system call for processing.
+A void pointer is initialized in the xhw3 program to pack all the arguments together for sending to the system call. 
+The sys_xjob system call receives this void pointer in its own copy of the void pointer using copy_from_user. 
+String arguments like the input filenames and the encryption/decryption key are stored in kernel space memory
+(assigned by kmalloc) by using getname. Once all the arguments have been copied into the kernel memory the system call performs
+validations on the input data to check if the data entered is valid. These checks include verifying whether the input files 
+specified by the user exist, have read permissions for the current user, the encryption key specified is in proper format.
+If any of these arguments have an error associated with them the job is not submitted for processing and the appropriate 
+error number is notified to the user.
+
+C)	Queue operations
+When the user submits the job first time, it gets added into the main queue by the producer. If the current jobs have 
+not completed and more jobs are added such that the queue length exceed its maximum capacity (5), the newly submitted jobs 
+are added into the wait queue. The producers and consumers work on these queues to perform their respective operations. Also, 
+if the wait queue is also full, then that producer is made to sleep which is again waken up by the consumer when at least one
+job is processed.
+D)	Initializing jobs in the system call (Producer)
+Once the proper arguments have been received in the kernel space the system call proceeds with initializing the jobs. The
+Producer is the main asmlinkage function which creates a job structure each time xhw3 submits a job. The producer adds the
+job received by xhw3 into the main queue if the main queue is not full. If the main queue is full the job gets added into
+the wait queue. If the wait queue is also full then the producer waits for the wait queue to have space for adding a new job. 
+The producer when finding the main queue with a space to add a job, adds the job to the main queue and wakes a consumer to 
+process the job. The consumer moves the first job from the wait queue to the tail of the main queue if the wait queue is not 
+empty. The producer wakes up the consumers using wake_up_all. The producer can be of a blocking user type or a non-blocking
+user type the behavior of which is explained in the notifying to user netlink section.
+E)	Processing the jobs in the system call (Consumer)
+The consumer threads are initialized as soon as the module sys_xjob is inserted. In this assignment there are 2 consumer threads initialized but they can be increased to N threads as long as it is scalable. The consumer threads sleep until they are woken up by a producer. Once a producer wakes up a particular consumer, the consumer takes the first job for processing from the main queue. If it finds that there were jobs in the wait queue and the main queue is not full, it removes the first job from wait queue and adds it to the tail of the main queue. 
+The consumer checks if there are more jobs in the main queue for processing. If there are jobs in the main queue then
+it again repeats the above process for performing the job otherwise it goes in the sleep state using wait_event_interruptible 
+with the condition of main queue length greater than zero.  Also, the consumer yields the process after processing every file 
+as well as every job using schedule().
+F)	Notifying the User (NETLINK)
+The callback mechanism used is netlink. If the user has enabled the callback mechanism while calling the syscall, 
+user program makes a socket and binds it to listen for messages. Receive message is a blocking call, 
+so the user program gets blocked there. When consumer has consumed the job, it unicasts a UDP packet to the user program 
+using its pid which unblocks the user program. User program prints the returned message and exists.
+G)	Locking mechanism
+Since the main queue and the wait queue used in this assignment where shared resources among the producers and the consumers,
+operations on queue are protected by a lock. The lock used is a mutex lock and is applied on the queue for operations like 
+adding job to a queue, removing job from a queue and checking the length of a queue.
+
+EXTRA CREDIT
+This assignment has the following features added:
+a)	Computing checksum using CRC32 and MD5
+b)	Performing Encryption/Decryption using AES and Blowfish
+c)	Prioritizing jobs – Every job can be added with a priority of High, Medium or Low. If no priority is given, 
+then the job assumes the priority as low.
+d)	Logging – a log file with the name .prod_cons.log is created in the current working directory which logs the status
+of all the jobs.
+
+REQUIREMENTS
+This assignment has been tested on VM Ware virtual machine with the processor Intel(R) Xeon(R) CPU E5620 @ 2.40 GHz. 
+This assignment requires a multi-core processor for robust performance. The system call was built and tested on linux
+kernel 3.2.2 on Cent OS 5.10. This might work on other linux flavors but is not tested. 
